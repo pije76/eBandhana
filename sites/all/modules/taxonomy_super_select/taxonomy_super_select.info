@@ -1,0 +1,11 @@
+name = Taxonomy Super Select
+description = Changes the default taxonomy select box into checkbox or radio buttons
+dependencies[] = taxonomy
+core = 6.x
+
+; Information added by drupal.org packaging script on 2013-10-19
+version = "6.x-1.4+4-dev"
+core = "6.x"
+project = "taxonomy_super_select"
+datestamp = "1382146184"
+

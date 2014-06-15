@@ -1,0 +1,11 @@
+name = Content Templates
+description = Create templates to customize output of teaser and body content.
+package = CCK
+core = 6.x
+
+; Information added by drupal.org packaging script on 2013-09-30
+version = "6.x-1.2+8-dev"
+core = "6.x"
+project = "contemplate"
+datestamp = "1380566882"
+

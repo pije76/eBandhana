@@ -1,0 +1,11 @@
+
+name = User Stats
+description = "Provides post count and other user statistics. Integrates well with Token and Advanced Forum (if installed)."
+core = 6.x
+
+; Information added by drupal.org packaging script on 2013-03-19
+version = "6.x-1.0"
+core = "6.x"
+project = "user_stats"
+datestamp = "1363665952"
+

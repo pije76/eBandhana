@@ -1,0 +1,12 @@
+name = Messaging Privatemsg
+description = Sending Method: Integration with Privatemsg (Beta)
+package = "Messaging"
+dependencies[] = messaging
+dependencies[] = privatemsg
+core = 6.x
+; Information added by drupal.org packaging script on 2013-10-01
+version = "6.x-4.0-beta8+4-dev"
+core = "6.x"
+project = "messaging"
+datestamp = "1380587029"
+

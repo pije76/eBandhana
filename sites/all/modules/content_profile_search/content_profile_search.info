@@ -1,0 +1,12 @@
+name = Content Profile Search
+description = Find and filter users by any content_profile text field or role.
+package = Content Profile
+core = 6.x
+dependencies[] = content_profile
+
+; Information added by drupal.org packaging script on 2013-09-30
+version = "6.x-1.0-alpha1+2-dev"
+core = "6.x"
+project = "content_profile_search"
+datestamp = "1380567043"
+

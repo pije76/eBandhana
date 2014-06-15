@@ -1,0 +1,11 @@
+name = Administration Development tools
+description = Administration and debugging functionality for developers and site builders.
+package = Administration
+core = 6.x
+
+; Information added by drupal.org packaging script on 2013-09-30
+version = "6.x-3.0-alpha4+39-dev"
+core = "6.x"
+project = "admin_menu"
+datestamp = "1380552823"
+

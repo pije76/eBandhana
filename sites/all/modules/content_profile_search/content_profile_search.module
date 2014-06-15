@@ -1,0 +1,422 @@
+<?php
+/**
+ * @file
+ * Module that provides content profile search functionality.
+ */
+
+define('CONTENT_PROFILE_SEARCH_LIKE', "'%%%s%%'");
+
+/**
+ * Implementation of hook_menu()
+ */
+function content_profile_search_menu() {
+  $items = array();
+  $items['admin/settings/content_profile_search'] = array(
+    'title' => 'Content Profile Search Settings',
+    'description' => 'Change settings for the content_profile_search module',
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array('content_profile_search_admin_settings'),
+    'access arguments' => array('administer content profile search'),
+    'file' => 'content_profile_search.admin.inc',
+  );
+  $items['admin/user/user/content_profile_search'] = array(
+    'title' => 'Search users and profiles',
+    'description' => 'Search users and content profile text fields',
+    'page callback' => 'content_profile_search_page',
+    'access arguments' => array('search content profile fields'),
+    'file' => 'content_profile_search.pages.inc',
+  );
+  return $items;
+}
+
+/**
+ * Implementation of hook_perm.
+ */
+function content_profile_perm() {
+  return array('administer content profile search', 'search content profile fields');
+}
+
+/**
+ * Helper that returns a list of defined TEXT fields in content_profile nodes.
+ *
+ * @param $check_access
+ *   If true, only return fields the current user may view.
+ */
+function _content_profile_search_fields($check_access = TRUE) {
+
+  // Get a list of profile nodes.
+  $types = content_profile_get_types('names');
+  if (empty($types)) {
+    drupal_set_message(t('You need to configure some profile nodes before you can search them.'), 'error');
+    return array();
+  }
+
+  // Get searchable fields in these node types.
+  $query = "/* Find eligible text field definitions */
+    SELECT
+      cnf.field_name AS field_name,
+      cnf.multiple AS multiple,
+      cnfi.type_name AS type_name,
+      cnfi.label AS field_label,
+      cnf.global_settings AS global_settings,
+      nt.name AS type_label
+    FROM
+      {content_node_field} AS cnf
+    LEFT JOIN
+      {content_node_field_instance} AS cnfi ON (cnfi.field_name = cnf.field_name)
+    LEFT JOIN
+      {node_type} AS nt ON (nt.type = cnfi.type_name)
+    WHERE
+        cnf.type IN ('number', 'text')
+      AND
+        cnfi.type_name IN (". db_placeholders($types, 'text') .")
+    ORDER BY
+      cnfi.type_name ASC,
+      cnfi.weight ASC";
+
+  $result = db_query($query, array_keys($types));
+  $fields = array();
+  while ($row = db_fetch_object($result)) {
+    // If we need to do an access check
+    //   AND the content_perms module exists
+    //   AND we aren't allowed to view the field
+    // Then skip to the next query result.
+    if ($check_access && module_exists('content_permissions') && !content_access('view', (array)$row)) {
+      continue;
+    }
+    $row->shared = 0;
+    $fields[$row->type_name .'|' . $row->field_name] = $row;
+  }
+
+  // Check if any given field is shared between nodes, this affects how the
+  // search query is built. This is a bit ugly, but there you go.
+  foreach ($fields as $label => $field) {
+    if (!empty($field->shared)) {
+      continue;
+    }
+    foreach ($fields as $check => $data) {
+      if ($check == $label) {
+        continue;
+      }
+      if ($data->field_name == $field->field_name) {
+        $fields[$label]->shared = $fields[$check]->shared + 1;
+      }
+    }
+  }
+  return $fields;
+}
+
+/**
+ * Helper to turn an array of field into into something formapi understands.
+ *
+ * @param $fields
+ *   An array with field information.
+ * @param $show_type
+ *   A boolean that determines whether to append the content type name or not.
+ */
+function _content_profile_search_fields_options($fields, $show_type = FALSE) {
+  $options = array();
+  foreach ($fields as $name => $field) {
+    $options[$name] = empty($show_type) ? $field->field_label : $field->field_label . ' (' . $field->type_label . ')';
+  }
+  return $options;
+}
+
+/**
+ * Returns a list of custom roles that the user (or other modules) added
+ * to drupal.
+ */
+function _content_profile_search_roles() {
+  $roles = user_roles(TRUE);
+  unset($roles[DRUPAL_AUTHENTICATED_RID]);
+  return $roles;
+}
+
+/**
+ * Perform the search and returned a themed table of results.
+ *
+ * The meat, as it were.
+ *
+ * @return Array
+ *   A keyed array containing the following keys:
+ *   - data:  A themed, paged table of results.
+ *   - pager: A themed pager for the result set.
+ */
+function content_profile_search_build_query() {
+  global $user;
+
+  $filter = $_SESSION['content_profile_search_filter'];
+
+  if (empty($filter['string'])) {
+    drupal_set_message(t('Not searching for an empty string'), 'warning');
+    return array();
+  }
+
+  // Turn the search string into an array of words, so we can do a boolean search.
+  $items = split(' ', trim($filter['string']));
+
+  // Shorten the boolean search operator variable.
+  $bool = empty($filter['boolean']) ? array('OR') : array($filter['boolean']);
+
+  // Get a list of fields that we need to search through.
+  $fields = array_intersect_key(_content_profile_search_fields(TRUE), array_filter($filter['fields']));
+
+  // Parse these fields into nodes. This must be a separate array, because
+  // depending on whether the field may contain multiple values, we may need
+  // to join a separate table to the query.
+  $nodes = array();
+  foreach ($fields as $field) {
+    $nodes[$field->type_name] = array('multiple' => ($field->shared) ? 1 : $field->multiple);
+  }
+
+  // Parse roles.
+  if (!empty($filter['roles'])) {
+    $roles = array_filter($filter['roles']);
+  }
+
+  // TODO: Allow search for ALL or ANY (AND / OR) if multiple words are entered in search string.
+  // TODO: Spit dummy if the number of search fields is too big and would make MySQL do poo.
+
+  // Create an array of arguments to be passed to db_query().
+  $args = array();
+
+  // Start assembling the search query.
+  $query = 'SELECT DISTINCT(u.uid), u.name, u.mail';
+
+  // Add each of the fields we need to search.
+  foreach ($fields as $field) {
+    if ($field->multiple || $field->shared) {
+      $query .= ', content_'. $field->field_name .'_'. $field->shared .'.'. $field->field_name .'_value AS '. $field->field_name .'_'. $field->shared . '_value';
+    }
+    else {
+      $query .= ', content_type_'. $field->type_name .'.'. $field->field_name .'_value';
+    }
+  }
+
+  // Show last access time. Kind of helpful :-)
+  //
+  $query .= ', u.access';
+
+  // Always search this table.
+  //
+  $query .= ' FROM {users} AS u';
+
+  foreach ($nodes as $node => $data) {
+    $query .= ' LEFT JOIN {node} AS n_' . $node . ' ON (n_' . $node . '.uid = u.uid AND n_' . $node . '.type = ' . db_placeholders($node, 'text') . ')';
+    $args[] = $node;
+  }
+
+  // Join each content_profile node type via its owner uid.
+  foreach ($fields as  $field) {
+    // Shared field tables are joined several times using a numeric alias.
+    if ($field->multiple || $field->shared) {
+      $query .= ' LEFT JOIN {content_' . $field->field_name . '} AS content_'. $field->field_name .'_'. $field->shared .' ON (content_' . $field->field_name . '_' . $field->shared .'.nid = n_' . $field->type_name . '.nid)';
+    }
+    else {
+      // Do not join this table multiple times using the same name for node
+      // types with multiple single-value fields, that leads to broken.
+      if (strpos($query, '{content_type_' . $field->type_name . '}') === FALSE) {
+        $query .= ' LEFT JOIN {content_type_' . $field->type_name . '} ON ({content_type_' . $field->type_name . '}.nid = n_' . $field->type_name . '.nid)';
+      }
+    }
+  }
+
+  // If we need to filter by role...
+  if (count($roles)) {
+    $query .= ' JOIN {users_roles} AS ur ON (u.uid=ur.uid)';
+  }
+
+  // Always search login name.
+  $query .= ' WHERE (('. _content_profile_search_like_placeholders($items, 'u.name') .')';
+  $args = array_merge($args, $items);
+
+  // Always search email address.
+  $query .= ' OR ('. _content_profile_search_like_placeholders($items, 'u.mail') .')';
+  $args = array_merge($args, $items);
+
+  foreach ($fields as $field) {
+    $field->keys = array();
+    $field->allowed_values = content_profile_search_get_allowed_values($field->global_settings);
+    if (!empty($field->allowed_values)) {
+      foreach ($field->allowed_values as $key => $value) {
+        foreach ($items as $item) {
+          if (stripos($value, $item) !== FALSE) {
+            $field->keys[$key] = $key;
+          }
+        }
+      }
+    }
+    if ($field->multiple || $field->shared) {
+      if (!empty($field->allowed_values)) {
+        if (!empty($field->keys)) {
+          $query .= ' %s content_'. $field->field_name .'_'. $field->shared .'.'. $field->field_name .'_value IN (' . db_placeholders($field->keys, 'text') .')';
+          $args = array_merge($args, $bool, $field->keys);
+        }
+      }
+      else {
+        // $placeholders = array_fill(0, count($items), 'content_'. $field->field_name .'_'. $field->shared .'.'. $field->field_name ."_value LIKE '%%%s%%'");
+        // $query .= ' %s (' . implode(" OR ", $placeholders) .")";
+        $query .= ' %s (' . _content_profile_search_like_placeholders($items, 'content_'. $field->field_name .'_'. $field->shared .'.'. $field->field_name .'_value') .')';
+        $args = array_merge($args, $bool, $items);
+      }
+    } // endif multiple or shared
+    else {
+      if (!empty($field->allowed_values)) {
+        if (!empty($field->keys)) {
+          $query .= ' %s {content_type_'. $field->type_name .'}.'. $field->field_name .'_value IN ('. db_placeholders($field->keys, 'text') .')';
+          $args = array_merge($args, $bool, $field->keys);
+        }
+      }
+      else {
+        $query .= ' %s ('. _content_profile_search_like_placeholders($items, '{content_type_'. $field->type_name .'}.'. $field->field_name .'_value') .')';
+        $args = array_merge($args, $bool, $items);
+      }
+    }
+  }
+
+  // And filter by role if required.
+  if (!empty($roles)) {
+    $query .= ') AND ur.rid IN('. db_placeholders($roles, 'int') .')';
+    $args = array_merge($args, $roles);
+  }
+  else {
+    $query .= ')';
+  }
+  // Never include the anonymous user, even if it ends up owning profile
+  // nodes. Just. Don't.
+  $query .= ' AND u.uid <> 0';
+
+  // Because pager_query sucks, we need to do a seperate count query. So
+  // for each search this query runs TWICE. Do this before adding the
+  // ORDER and GROUP clauses.
+  $count_query = preg_replace(array('/SELECT.*?FROM /As'), array('SELECT COUNT(DISTINCT(u.uid)) FROM '), $query);
+
+  // Make a pretty sortable table header.
+  //
+  $header = array();
+  $header[] = array('data' => t('ID'),   'field' => 'u.uid');
+  $header[] = array('data' => t('Name'), 'field' => 'u.name');
+  $header[] = array('data' => t('Mail'), 'field' => 'u.mail');
+
+  // Add the dynamic ones where needed.
+  //
+  foreach ($fields as $field) {
+    if ($field->shared) {
+      $header[] = array('data' => $field->field_label .' ('. $field->type_label .')', 'field' => 'content_'. $field->field_name .'_'. $field->shared .'.'. $field->field_name .'_value');
+    }
+    else if ($field->multiple) {
+      $header[] = array('data' => $field->field_label, 'field' => 'content_'. $field->field_name .'_'. $field->shared .'.'. $field->field_name .'_value');
+    }
+    else {
+      $header[] = array('data' => $field->field_label, 'field' => '{content_type_'. $field->type_name .'}.'. $field->field_name .'_value');
+    }
+  }
+
+  // And the final static one.
+  //
+  $header[] = array('data' => t('Last access'), 'field' => 'u.access', 'sort' => 'desc');
+
+  // We better group by uid, so we don't end up with a single result row for
+  // each `multiple' field value.
+  $query .= ' GROUP BY u.uid';
+
+  // Add an order clause...
+  //
+  $query .= tablesort_sql($header);
+
+  // Run the search.
+  $result = pager_query($query, variable_get('content_profile_pager_items', 50), 0, $count_query, $args);
+  $pager = theme('pager', NULL, variable_get('content_profile_pager_items', 50));
+
+  // Turn the result field login name into a link to the user account page.
+  $data = array();
+  while ($row = db_fetch_array($result)) {
+
+    $name = $row['name']; // We may need this one later.
+    $row['name'] = l($row['name'], 'user/' . $row['uid']);
+    $row['access'] = t('!interval ago', array('!interval' => format_interval(time() - $row['access'])));
+
+    // If a field has allowed values and has found only an index key,
+    // display the associated value instead. That would be nice.
+    foreach ($fields as $field) {
+      if ($field->multiple || $field->shared) {
+        if ($field->allowed_values && isset($row[$field->field_name .'_'. $field->shared .'_value'])) {
+          $row[$field->field_name .'_'. $field->shared .'_value'] = $field->allowed_values[$row[$field->field_name .'_'. $field->shared .'_value']];
+        }
+      }
+      else {
+        if ($field->allowed_values && isset($row[$field->field_name .'_value'])) {
+          $row[$field->field_name .'_value'] = $field->allowed_values[$row[$field->field_name .'_value']];
+        }
+      }
+    }
+
+    // If we have devel.module AND permission to switch users, add a link.
+    if (module_exists('devel') && user_access('switch users')) {
+      $row['uid'] = l($row['uid'], 'devel/switch/' . $name, array('query' => array('destination' => 'user')));
+    }
+
+    // Add the `fixed' result set to the output array.
+    $data[] = $row;
+  }
+
+  // Reassemble the strings for UX purposes.
+  $string = implode('" ' . implode('', $bool) . ' "', $items);
+
+  // Warn the user if no returns were found and bypass the table data creation.
+  if (!count($data)) {
+    drupal_set_message(t('No users matching "@string" were found', array('@string' => $string)), 'warning');
+    return array();
+  }
+
+  return array(
+    'data' => theme('table', $header, $data),
+    'pager' => $pager,
+  );
+}
+
+/**
+ * Helper to extract a keyed array of `allowed values' for a select/checkboxes field definition.
+ *
+ * @param $global_settings
+ *   The serialized field settings array.
+ *
+ * @return
+ *   An keyed array of allowed field values.
+ */
+function content_profile_search_get_allowed_values($global_settings) {
+  $settings = unserialize($global_settings);
+
+  $values = array();
+
+  if ($settings['allowed_values']) {
+    if (strpos($settings['allowed_values'], '|') !== FALSE) {
+      $pairs = explode("\n", $settings['allowed_values']);
+      foreach ($pairs as $pair) {
+        list($key, $val) = explode("|", $pair);
+        $values[$key] = $val;
+      }
+    }
+  }
+  else if ($settings['allowed_values_php']) {
+    $values = eval($settings['allowed_values_php']);
+  }
+
+  return $values;
+}
+
+/**
+ * Helper that creates LIKE statements for strings.
+ *
+ * @param $arguments
+ *   An array of like-typed query arguments that need placeholders.
+ * @param $field
+ *   The name of the database field that is to be queried.
+ *
+ * @return
+ *   A string that can be appended to an SQL query.
+ */
+function _content_profile_search_like_placeholders($arguments, $field) {
+  $parts = array_fill(0, count($arguments), $field .' LIKE '. CONTENT_PROFILE_SEARCH_LIKE);
+  return implode(' OR ', $parts);
+}

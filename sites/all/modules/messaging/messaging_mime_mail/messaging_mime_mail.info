@@ -1,0 +1,12 @@
+name = Messaging Mime Mail
+description = Mail Sending Method: Integration with Mime Mail module (Beta)
+package = "Messaging"
+dependencies[] = messaging_mail
+dependencies[] = mimemail
+core = 6.x
+; Information added by drupal.org packaging script on 2013-10-01
+version = "6.x-4.0-beta8+4-dev"
+core = "6.x"
+project = "messaging"
+datestamp = "1380587029"
+
